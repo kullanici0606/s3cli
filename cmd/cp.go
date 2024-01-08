@@ -7,14 +7,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/spf13/cobra"
 )
 
@@ -31,7 +32,7 @@ var cpCmd = &cobra.Command{
 var globalFlatten bool
 
 func init() {
-	s3Cmd.AddCommand(cpCmd)
+	rootCmd.AddCommand(cpCmd)
 	cpCmd.Flags().BoolVarP(&globalFlatten, "flatten", "f", false, "flatten directory tree")
 }
 
@@ -87,31 +88,13 @@ func (s *s3client) copyFromLocalToS3(src, dest string) error {
 		return nil
 	}
 
-	fnch := make(chan func() error, 10)
-	outch := make(chan string, 10)
+	fnch := make(chan func() error, globalMaxParallelRequests)
+	outch := make(chan string, globalMaxParallelRequests)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		err = s.runPooled(fnch)
-		if err != nil {
-			cancel()
-			fmt.Fprintln(os.Stderr, err)
-		}
-		close(outch)
-		wg.Done()
-	}()
-
-	wg.Add(1)
-	go func() {
-		for out := range outch {
-			fmt.Println(out)
-		}
-		wg.Done()
-	}()
+	wg := s.runPooled(cancel, fnch, outch)
 
 	if strings.HasSuffix(dest, "/") {
 		dest += info.Name()
@@ -180,9 +163,7 @@ func (dcp *directoryCopier) walkDirFunc(path string, d fs.DirEntry, err error) e
 	return nil
 }
 
-// generate remote path for upload
-// dest remote path prefix
-// path local path
+// generate remote path from local path for upload
 func (dcp *directoryCopier) generateRemotePath(path string) string {
 	subpath := strings.TrimPrefix(path, dcp.srcRoot)
 	if dcp.pathSeparator != '/' {
@@ -226,9 +207,102 @@ func (s *s3client) copySingleToS3(src, dest string) (string, error) {
 }
 
 func (s *s3client) copyFromS3ToLocal(src, dest string) error {
-	// TODO implement
-	fmt.Fprintln(os.Stderr, "not implemented yet")
+	if !strings.HasSuffix(src, "/") && !strings.HasSuffix(src, "*") {
+		path, err := s.copySingleFromS3ToLocal(src, dest)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Download %s to %s\n", src, path)
+	}
+
+	src = strings.TrimSuffix(src, "*")
+
+	bucket, prefix, err := extractBucketAndKey(src)
+	if err != nil {
+		return err
+	}
+
+	fnch := make(chan func() error, globalMaxParallelRequests)
+	outch := make(chan string, globalMaxParallelRequests)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	wg := s.runPooled(cancel, fnch, outch)
+
+	s.listObject(ctx, bucket, prefix, func(o types.Object) {
+		fnch <- func() error {
+			if globalFlatten {
+				path, err := s.downloadFile(bucket, aws.ToString(o.Key), dest)
+				if err != nil {
+					return err
+				}
+				outch <- fmt.Sprintf("Download %s to %s", src, path)
+				return nil
+			}
+
+			path := convertToLocalPath(prefix, aws.ToString(o.Key), dest)
+			err = os.MkdirAll(filepath.Dir(path), 0755)
+			if err != nil {
+				return err
+			}
+
+			path, err := s.downloadFile(bucket, aws.ToString(o.Key), path)
+			if err != nil {
+				return err
+			}
+			srcPath := src + "/" + aws.ToString(o.Key)
+			outch <- fmt.Sprintf("Download %s to %s", srcPath, path)
+			return nil
+		}
+	})
+
+	close(fnch)
+	wg.Wait()
+
+	if err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func convertToLocalPath(prefix, key, dest string) string {
+	p := strings.TrimPrefix(key, prefix)
+	cols := []string{dest}
+	cols = append(cols, strings.Split(p, "/")...)
+	return filepath.Join(cols...)
+}
+
+func (s *s3client) copySingleFromS3ToLocal(src, dest string) (string, error) {
+	bucket, key, err := extractBucketAndKey(src)
+	if err != nil {
+		return "", err
+	}
+
+	return s.downloadFile(bucket, key, dest)
+}
+
+func (s *s3client) downloadFile(bucket string, key string, dest string) (string, error) {
+	output, err := s.client.GetObject(context.Background(), &s3.GetObjectInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(key),
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	defer output.Body.Close()
+
+	f, err := os.Create(dest)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	io.Copy(f, output.Body)
+	return dest, nil
 }
 
 func (s *s3client) copyFromS3ToS3(src, dest string) error {

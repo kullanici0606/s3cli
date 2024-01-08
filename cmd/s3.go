@@ -7,20 +7,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
 	"strings"
+	"sync"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/spf13/cobra"
 	"golang.org/x/sync/errgroup"
 )
-
-// s3Cmd represents the s3 command
-var s3Cmd = &cobra.Command{
-	Use:   "s3",
-	Short: "S3 Utilities",
-}
 
 const (
 	s3prefix    = "s3://"
@@ -29,15 +24,6 @@ const (
 
 var errNotS3path = errors.New("not a s3 path")
 var errNoBucketFound = errors.New("no bucket found")
-
-var globalS3Endpoint string
-var globalMaxParallelRequests int
-
-func init() {
-	rootCmd.AddCommand(s3Cmd)
-	s3Cmd.PersistentFlags().StringVarP(&globalS3Endpoint, "endpoint", "e", "", "Use alternative endpoint")
-	s3Cmd.PersistentFlags().IntVarP(&globalMaxParallelRequests, "max-parallel-requests", "m", 10, "Number of maximum requests to run in parallel")
-}
 
 type s3client struct {
 	client *s3.Client
@@ -66,9 +52,8 @@ func newClient() (*s3client, error) {
 	return &s3client{client: client}, nil
 }
 
-func (s *s3client) runPooled(fnch <-chan func() error) error {
+func (s *s3client) runWithErrgroup(fnch <-chan func() error) error {
 	errg := new(errgroup.Group)
-
 	for i := 0; i < globalMaxParallelRequests; i++ {
 		errg.Go(func() error {
 			for {
@@ -76,7 +61,6 @@ func (s *s3client) runPooled(fnch <-chan func() error) error {
 				if !open {
 					break
 				}
-
 				err := fn()
 				if err != nil {
 					return err
@@ -89,8 +73,32 @@ func (s *s3client) runPooled(fnch <-chan func() error) error {
 	if err := errg.Wait(); err != nil {
 		return err
 	}
-
 	return nil
+}
+
+// run functions read from fnch in a pool of goroutines and write their outputs to outch, exit on error
+func (s *s3client) runPooled(cancel context.CancelFunc, fnch <-chan func() error, outch chan string) *sync.WaitGroup {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		err := s.runWithErrgroup(fnch)
+		if err != nil {
+			cancel()
+			fmt.Fprintln(os.Stderr, err)
+		}
+		close(outch)
+		wg.Done()
+	}()
+
+	wg.Add(1)
+	go func() {
+		for out := range outch {
+			fmt.Println(out)
+		}
+		wg.Done()
+	}()
+
+	return &wg
 }
 
 func extractBucketAndKey(path string) (bucket, key string, err error) {

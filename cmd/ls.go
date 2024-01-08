@@ -12,6 +12,7 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
+	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/spf13/cobra"
 )
 
@@ -26,7 +27,7 @@ var lsCmd = &cobra.Command{
 }
 
 func init() {
-	s3Cmd.AddCommand(lsCmd)
+	rootCmd.AddCommand(lsCmd)
 }
 
 func executeLs(args []string) {
@@ -47,7 +48,7 @@ func executeLs(args []string) {
 
 	if strings.HasSuffix(key, "*") {
 		key = key[:len(key)-1]
-		err = client.listObject(bucket, key)
+		err = client.listObject(context.Background(), bucket, key, printObjectDetails)
 	} else {
 		err = client.listSingleObject(bucket, key)
 	}
@@ -55,6 +56,10 @@ func executeLs(args []string) {
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
+}
+
+func printObjectDetails(object types.Object) {
+	fmt.Printf("%s\t%d\t%s\n", object.LastModified, object.Size, aws.ToString(object.Key))
 }
 
 func (s *s3client) listSingleObject(bucket, path string) error {
@@ -72,11 +77,19 @@ func (s *s3client) listSingleObject(bucket, path string) error {
 	return nil
 }
 
-func (s *s3client) listObject(bucket, prefix string) error {
+func (s *s3client) listObject(ctx context.Context, bucket, prefix string, onObject func(types.Object)) error {
 	isTruncated := true
 	var continuationToken *string
 
+loop:
 	for isTruncated {
+		select {
+		case <-ctx.Done():
+			break loop
+		default:
+			// do nothing
+		}
+
 		output, err := s.client.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
 			Bucket:            aws.String(bucket),
 			Prefix:            aws.String(prefix),
@@ -94,7 +107,7 @@ func (s *s3client) listObject(bucket, prefix string) error {
 
 		for _, object := range output.Contents {
 			// todo format time and size
-			fmt.Printf("%s\t%d\t%s\n", object.LastModified, object.Size, aws.ToString(object.Key))
+			onObject(object)
 		}
 
 		isTruncated = *output.IsTruncated
