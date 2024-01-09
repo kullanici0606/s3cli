@@ -84,7 +84,7 @@ func (s *s3client) runPooled(cancel context.CancelFunc, fnch <-chan func() error
 		err := s.runWithErrgroup(fnch)
 		if err != nil {
 			cancel()
-			fmt.Fprintln(os.Stderr, err)
+			fmt.Fprintln(os.Stderr, "An error occured:", err)
 		}
 		close(outch)
 		wg.Done()
@@ -108,7 +108,16 @@ func extractBucketAndKey(path string) (bucket, key string, err error) {
 
 	path = path[s3prefixLen:]
 	idx := strings.IndexRune(path, '/')
+	if idx == -1 && len(path) == 0 {
+		return "", "", errNoBucketFound
+	}
+
 	if idx == -1 {
+		return path, "", nil
+	}
+
+	bucket = path[:idx]
+	if len(bucket) == 0 {
 		return "", "", errNoBucketFound
 	}
 

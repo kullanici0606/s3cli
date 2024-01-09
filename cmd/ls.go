@@ -12,7 +12,6 @@ import (
 
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/s3"
-	"github.com/aws/aws-sdk-go-v2/service/s3/types"
 	"github.com/spf13/cobra"
 )
 
@@ -28,6 +27,12 @@ var lsCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(lsCmd)
+}
+
+type listParams struct {
+	bucket    string
+	prefix    *string
+	delimiter *string
 }
 
 func executeLs(args []string) {
@@ -46,10 +51,18 @@ func executeLs(args []string) {
 		return
 	}
 
-	if strings.HasSuffix(key, "*") {
-		key = key[:len(key)-1]
-		err = client.listObject(context.Background(), bucket, key, printObjectDetails)
-	} else {
+	switch {
+	case strings.HasSuffix(key, "*"):
+		key = strings.TrimSuffix(key, "*")
+		params := listParams{bucket: bucket, prefix: aws.String(key)}
+		err = client.listObject(context.Background(), params, printObjectDetails)
+	case strings.HasSuffix(key, "/"):
+		params := listParams{bucket: bucket, prefix: aws.String(key), delimiter: aws.String("/")}
+		err = client.listObject(context.Background(), params, printObjectDetails)
+	case len(key) == 0:
+		params := listParams{bucket: bucket, delimiter: aws.String("/")}
+		err = client.listObject(context.Background(), params, printObjectDetails)
+	default:
 		err = client.listSingleObject(bucket, key)
 	}
 
@@ -58,8 +71,16 @@ func executeLs(args []string) {
 	}
 }
 
-func printObjectDetails(object types.Object) {
-	fmt.Printf("%s\t%d\t%s\n", object.LastModified, object.Size, aws.ToString(object.Key))
+func printObjectDetails(output *s3.ListObjectsV2Output) {
+	for _, prefix := range output.CommonPrefixes {
+		fmt.Println("PRE ", aws.ToString(prefix.Prefix))
+	}
+
+	for _, object := range output.Contents {
+		// todo format time and size
+
+		fmt.Printf("%s\t%-10d\t%s\n", aws.ToTime(object.LastModified), aws.ToInt64(object.Size), aws.ToString(object.Key))
+	}
 }
 
 func (s *s3client) listSingleObject(bucket, path string) error {
@@ -77,7 +98,7 @@ func (s *s3client) listSingleObject(bucket, path string) error {
 	return nil
 }
 
-func (s *s3client) listObject(ctx context.Context, bucket, prefix string, onObject func(types.Object)) error {
+func (s *s3client) listObject(ctx context.Context, params listParams, onList func(*s3.ListObjectsV2Output)) error {
 	isTruncated := true
 	var continuationToken *string
 
@@ -91,9 +112,9 @@ loop:
 		}
 
 		output, err := s.client.ListObjectsV2(context.Background(), &s3.ListObjectsV2Input{
-			Bucket:            aws.String(bucket),
-			Prefix:            aws.String(prefix),
-			MaxKeys:           aws.Int32(5),
+			Bucket:            aws.String(params.bucket),
+			Prefix:            params.prefix,
+			Delimiter:         params.delimiter,
 			ContinuationToken: continuationToken,
 		})
 
@@ -105,10 +126,7 @@ loop:
 			slog.Debug("s3 list pagination", "token", aws.ToString(output.NextContinuationToken), "isTruncated", *output.IsTruncated)
 		}
 
-		for _, object := range output.Contents {
-			// todo format time and size
-			onObject(object)
-		}
+		onList(output)
 
 		isTruncated = *output.IsTruncated
 		continuationToken = output.NextContinuationToken

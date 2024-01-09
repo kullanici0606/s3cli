@@ -16,6 +16,20 @@ const (
 	s3toS3
 )
 
+func (c copyOperation) String() string {
+	switch c {
+	case localToS3:
+		return "localToS3"
+	case s3ToLocal:
+		return "s3ToLocal"
+	case s3toS3:
+		return "s3toS3"
+	default:
+		return "unknown"
+	}
+
+}
+
 type recordingClient struct {
 	op copyOperation
 }
@@ -42,8 +56,8 @@ func TestExecuteCopy(t *testing.T) {
 		inputDest string
 		want      copyOperation
 	}{
-		{"s3 to local", "/tmp/test.txt", "s3://bucket/", s3ToLocal},
-		{"local to s3", "s3://bucket/", "/tmp/test.txt", localToS3},
+		{"local to s3", "/tmp/test.txt", "s3://bucket/", localToS3},
+		{"s3 to local", "s3://bucket/", "/tmp/test.txt", s3ToLocal},
 		{"s3 to s3", "s3:///tmp/test.txt", "s3://bucket/", s3toS3},
 	}
 
@@ -70,6 +84,16 @@ func TestExecuteCopyLocalToLocal(t *testing.T) {
 	}
 }
 
+type dirEntry struct {
+	name string
+	dir  bool
+}
+
+func (d dirEntry) Name() string               { return d.name }
+func (d dirEntry) IsDir() bool                { return d.dir }
+func (d dirEntry) Info() (fs.FileInfo, error) { return nil, nil }
+func (d dirEntry) Type() fs.FileMode          { return 0755 }
+
 func TestWalkDirFuncCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
@@ -77,7 +101,7 @@ func TestWalkDirFuncCancel(t *testing.T) {
 		ctx: ctx,
 	}
 
-	err := dcp.walkDirFunc("/tmp", nil, nil)
+	err := dcp.walkDirFunc("/tmp", dirEntry{dir: false}, nil)
 	if !errors.Is(err, filepath.SkipAll) {
 		t.Errorf("SkipAll error expected here %s", err)
 	}
@@ -115,12 +139,45 @@ func TestGenerateRemotePath(t *testing.T) {
 	}
 }
 
-type dirEntry struct {
-	name string
-	dir  bool
+func TestExtractS3FileName(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"no delimiter", "test.txt", "test.txt"},
+		{"with delimiter", "foo/bar/test.txt", "test.txt"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := extractS3FileName(c.input)
+			if got != c.want {
+				t.Errorf("got %v want %v", got, c.want)
+			}
+		})
+	}
 }
 
-func (d dirEntry) Name() string               { return d.name }
-func (d dirEntry) IsDir() bool                { return d.dir }
-func (d dirEntry) Info() (fs.FileInfo, error) { return nil, nil }
-func (d dirEntry) Type() fs.FileMode          { return 0755 }
+func TestConvertToLocalPath(t *testing.T) {
+	cases := []struct {
+		name        string
+		inputPrefix string
+		inputKey    string
+		inputDest   string
+		want        string
+	}{
+		{"key with multiple delimiters", "prefix", "prefix/foo/bar/test.txt", "/tmp", "/tmp/foo/bar/test.txt"},
+		{"key with multiple delimiters with trailing slash", "prefix/", "prefix/foo/bar/test.txt", "/tmp", "/tmp/foo/bar/test.txt"},
+		{"key directly under prefix", "prefix", "prefix/test.txt", "/tmp", "/tmp/test.txt"},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := convertToLocalPath(c.inputPrefix, c.inputKey, c.inputDest)
+			if got != c.want {
+				t.Errorf("got %v want %v", got, c.want)
+			}
+		})
+	}
+}

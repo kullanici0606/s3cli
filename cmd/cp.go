@@ -135,13 +135,6 @@ type directoryCopier struct {
 }
 
 func (dcp *directoryCopier) walkDirFunc(path string, d fs.DirEntry, err error) error {
-	select {
-	case <-dcp.ctx.Done():
-		return filepath.SkipAll
-	default:
-		// do nothing
-	}
-
 	if err != nil {
 		return err
 	}
@@ -151,16 +144,21 @@ func (dcp *directoryCopier) walkDirFunc(path string, d fs.DirEntry, err error) e
 	}
 
 	remotepath := dcp.generateRemotePath(path)
-	dcp.fnch <- func() error {
+
+	select {
+	case <-dcp.ctx.Done():
+		return filepath.SkipAll
+	case dcp.fnch <- func() error {
 		s3path, err := dcp.copyFunc(path, remotepath)
 		if err != nil {
 			return err
 		}
-
 		dcp.outch <- fmt.Sprintf("upload %s %s", path, s3path)
 		return nil
+	}:
+		return nil
 	}
-	return nil
+
 }
 
 // generate remote path from local path for upload
@@ -213,6 +211,7 @@ func (s *s3client) copyFromS3ToLocal(src, dest string) error {
 			return err
 		}
 		fmt.Printf("Download %s to %s\n", src, path)
+		return nil
 	}
 
 	src = strings.TrimSuffix(src, "*")
@@ -230,30 +229,16 @@ func (s *s3client) copyFromS3ToLocal(src, dest string) error {
 
 	wg := s.runPooled(cancel, fnch, outch)
 
-	s.listObject(ctx, bucket, prefix, func(o types.Object) {
-		fnch <- func() error {
-			if globalFlatten {
-				path, err := s.downloadFile(bucket, aws.ToString(o.Key), dest)
-				if err != nil {
-					return err
-				}
-				outch <- fmt.Sprintf("Download %s to %s", src, path)
-				return nil
+	lsParams := listParams{bucket: bucket, prefix: aws.String(prefix)}
+	s.listObject(ctx, lsParams, func(output *s3.ListObjectsV2Output) {
+	loop:
+		for _, o := range output.Contents {
+			select {
+			case <-ctx.Done():
+				break loop
+			default:
+				s.enqueuForDownload(ctx, bucket, o, src, prefix, dest, fnch, outch)
 			}
-
-			path := convertToLocalPath(prefix, aws.ToString(o.Key), dest)
-			err = os.MkdirAll(filepath.Dir(path), 0755)
-			if err != nil {
-				return err
-			}
-
-			path, err := s.downloadFile(bucket, aws.ToString(o.Key), path)
-			if err != nil {
-				return err
-			}
-			srcPath := src + "/" + aws.ToString(o.Key)
-			outch <- fmt.Sprintf("Download %s to %s", srcPath, path)
-			return nil
 		}
 	})
 
@@ -267,6 +252,39 @@ func (s *s3client) copyFromS3ToLocal(src, dest string) error {
 	return nil
 }
 
+func (s *s3client) enqueuForDownload(ctx context.Context, bucket string, o types.Object, src, prefix, dest string, fnch chan func() error, outch chan string) {
+	select {
+	case <-ctx.Done():
+		return
+	case fnch <- func() error {
+		if globalFlatten {
+			path, err := s.downloadFile(bucket, aws.ToString(o.Key), dest)
+			if err != nil {
+				return err
+			}
+			outch <- fmt.Sprintf("Download %s to %s", src, path)
+			return nil
+		}
+
+		path := convertToLocalPath(prefix, aws.ToString(o.Key), dest)
+		err := os.MkdirAll(filepath.Dir(path), 0755)
+		if err != nil {
+			return err
+		}
+
+		path, err = s.downloadFile(bucket, aws.ToString(o.Key), path)
+		if err != nil {
+			return err
+		}
+		srcPath := src + "/" + aws.ToString(o.Key)
+		outch <- fmt.Sprintf("Download %s to %s", srcPath, path)
+		return nil
+	}:
+		// noop
+	}
+}
+
+// convert aws key excluding prefix to local path under dest as file stored subfolders
 func convertToLocalPath(prefix, key, dest string) string {
 	p := strings.TrimPrefix(key, prefix)
 	cols := []string{dest}
@@ -295,6 +313,15 @@ func (s *s3client) downloadFile(bucket string, key string, dest string) (string,
 
 	defer output.Body.Close()
 
+	isdir, err := isDirectory(dest)
+	if err != nil {
+		return "", err
+	}
+
+	if isdir {
+		dest = filepath.Join(dest, extractS3FileName(key))
+	}
+
 	f, err := os.Create(dest)
 	if err != nil {
 		return "", err
@@ -309,4 +336,32 @@ func (s *s3client) copyFromS3ToS3(src, dest string) error {
 	// TODO implement
 	fmt.Fprintln(os.Stderr, "not implemented yet")
 	return nil
+}
+
+var errDirectoryNotExists = errors.New("directory does not exist")
+
+func isDirectory(name string) (bool, error) {
+	info, err := os.Stat(name)
+	if err == nil {
+		return info.IsDir(), nil
+	}
+
+	if os.IsNotExist(err) && strings.HasSuffix(name, string(filepath.Separator)) {
+		return false, errDirectoryNotExists
+	}
+
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+
+	return false, err
+}
+
+func extractS3FileName(s3key string) string {
+	idx := strings.LastIndexByte(s3key, '/')
+	if idx == -1 {
+		return s3key
+	}
+
+	return s3key[idx+1:]
 }
