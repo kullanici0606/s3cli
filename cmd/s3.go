@@ -124,6 +124,7 @@ func extractBucketAndKey(path string) (bucket, key string, err error) {
 	return path[:idx], path[idx+1:], nil
 }
 
+// generate s3 path for given bucket and key
 func generateS3Path(bucket, key string) string {
 	return fmt.Sprintf("%s%s/%s", s3prefix, bucket, key)
 }
