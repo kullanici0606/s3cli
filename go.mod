@@ -1,6 +1,6 @@
 module com.github/kullanici0606/s3cli/v2
 
-go 1.21.5
+go 1.21
 
 require github.com/aws/aws-sdk-go-v2/config v1.26.3
 
