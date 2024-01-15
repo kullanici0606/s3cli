@@ -11,6 +11,7 @@ Available Commands:
   cp          Copy from/to S3
   help        Help about any command
   ls          List S3
+  rm          Remove S3 files
 
 Flags:
   -e, --endpoint string             Use alternative endpoint
@@ -34,6 +35,15 @@ $ s3cli ls s3://my-bucket/*
 
 ### Copying
 ```
-# download everytinh under my-bucket to directory temp
+# download everyting under the my-bucket to directory temp
 $ s3cli cp s3://my-bucket/* temp/
+```
+
+### Removing
+```
+# remove everyting under the temp directory in my-bucket
+$ s3cli rm s3://my-bucket/temp/* 
+
+# remove single obkect
+$ s3cli rm s3://my-bucket/foo/bar.txt
 ```
