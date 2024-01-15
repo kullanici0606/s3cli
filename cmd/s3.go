@@ -7,7 +7,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"sync"
 
@@ -84,7 +83,7 @@ func (s *s3client) runPooled(cancel context.CancelFunc, fnch <-chan func() error
 		err := s.runWithErrgroup(fnch)
 		if err != nil {
 			cancel()
-			fmt.Fprintln(os.Stderr, "An error occured:", err)
+			outch <- fmt.Sprint("An error occured:", err)
 		}
 		close(outch)
 		wg.Done()

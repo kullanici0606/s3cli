@@ -73,12 +73,13 @@ func executeLs(args []string) {
 
 func printObjectDetails(output *s3.ListObjectsV2Output) {
 	for _, prefix := range output.CommonPrefixes {
-		fmt.Println("PRE ", aws.ToString(prefix.Prefix))
+		// 29 width empty string for matching width with UTC time formatted object.LastModified
+		// 7 width empty string with "PRE" for matching 10 width object.Size
+		fmt.Printf("%29s\tPRE%7s\t%s\n", "", "", aws.ToString(prefix.Prefix))
 	}
 
 	for _, object := range output.Contents {
 		// todo format time and size
-
 		fmt.Printf("%s\t%-10d\t%s\n", aws.ToTime(object.LastModified), aws.ToInt64(object.Size), aws.ToString(object.Key))
 	}
 }
